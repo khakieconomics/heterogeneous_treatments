@@ -1,0 +1,85 @@
+---
+title: "A ridiculously simple model of heterogeneous treatment effects"
+author: "Jim Savage"
+date: "11 November 2016"
+output: html_document
+---
+
+Here are a few common problems. 
+
+1.  We have a limited amount of disaster relief money that we wish to distribute to regions that are
+most likely to benefit from it. 
+2. A political candidate wants to target their advertising towards those who are most likely
+to vote as a consequence. Or 
+3. an e-commerce firm wants to offer a product for the highest price a customer will be willing to pay. 
+
+Problems like these require using models that allow some individuals to have different treatment effects than
+other individuals. These heterogeneous treatment effect models are all the rage in causal inference nowadays, 
+and there are a boatload of methods currently in use. Some good examples include [Wager and Athey's causal forest idea](https://arxiv.org/pdf/1510.04342.pdf), and 
+Bayesian Additive Regression Trees (BART), used most famously by  [Green and Kern](http://poq.oxfordjournals.org/content/early/2012/09/11/poq.nfs036.abstract)
+and [Jennifer Hill](http://cds.nyu.edu/wp-content/uploads/2014/04/causal-and-data-science-and-BART.pdf).
+
+To my mind there are two issues with these machine-learning based methods. First, they need a large number of observations 
+to give stable estimates. That might not be an issue if you are a large e-commerce firm who can run enormous A/B 
+tests, but if you are in health research or aid (where you measure the cost of each observation in thousands or millions of dollars), 
+it might be prohibitive. Second, in an off-the-shelf application, there's no way of using instrumental variables 
+to help ameliorate the effects of unobserved confounders. This means they're pretty useless in quasi-experimental settings. 
+
+Below I illustrate a much simpler heterogeneous treatment effects model.
+
+The idea is simple. There are three candidate models: one with a negative treatment effect, one with a treatment
+effect of zero, and one of a positive treatment effect. Our estimate of each individual's treatment effect is
+the weighted average of the negative, zero and positive treatment effects, with the weights a function of individual
+characteristics. This has far fewer parameters than most heterogeneous treatment effects models, making it suitable
+for small data. It also can be easily extended to make use of instruments. It is similar in concept to the finite mixture
+models discussed [here](https://modernstatisticalworkflow.blogspot.com/2016/10/finite-mixture-models-in-stan.html)
+and [here](https://modernstatisticalworkflow.blogspot.com/2016/10/finite-mixture-model-with-time-varying.html). 
+
+### The generative model
+
+Each individual $i$ has outcome $y_{i}$ and a vector of pre-treatment characteristics $X_{i}$. Each individual has their own
+treatment effect $\tau_{i}$, which is the expected difference in outcomes between the treated and untreated state for a binary
+treatment $treat_{i}$. Their individual treatment effect is a function of $X_{i}$ and an idiosyncratic component $\eta_{i}$. 
+
+For simplicity, we let all functions be linear. So the model of treatment effects is
+
+$$
+\tau_{i} = \alpha_{tau} + X_{i}\gamma + \eta_{i}
+$$
+
+And the outcome model is 
+
+$$
+y_{i} = \alpha_{y} + X_{i}\beta + \tau_{i} treat_{i} + \epsilon_{i}
+$$
+
+where $\alpha_{\tau}$ and $\alpha_{y}$ are intercept terms, $\gamma$ and $\beta$ are regression coefficients, and 
+$\eta,\, \epsilon$ are idiosyncratic errors that are mean zero and _independently_ normal with scales $\sigma_{\tau}$
+and $\sigma_{y}$. 
+
+Let's simulate some fake data from this process (with known parameters)
+
+```{r}
+# Data - number of observations, number of covariates, a treatment vector, a 
+# covariate matrix, and a covariate matrix with a column of 1s
+N <- 500
+P <- 3
+treatment <- sample(0:1, N, replace = T)
+X <- matrix(rnorm(N*P), N, P)
+X2 <- cbind(rep(1, N),X)
+
+# Parameters (draw from prior) 
+beta <- rnorm(P+1)
+gamma <- rnorm(P+1)
+sigma <- abs(rcauchy(2, 0, 1))
+
+tau <- X2%*%gamma + rnorm(N, 0, sigma[1])
+Y <- X2%*%beta + tau*treatment + rnorm(N, 0, sigma[2])
+```
+
+### Estimating the model
+
+We could estimate the model directly
+
+
+
