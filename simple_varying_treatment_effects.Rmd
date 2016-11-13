@@ -1,6 +1,8 @@
 ---
 title: "A ridiculously simple model of heterogeneous treatment effects"
 author: "Jim Savage"
+header-includes:
+   - \usepackage{amsmath}
 date: "11 November 2016"
 output: html_document
 ---
@@ -79,7 +81,163 @@ Y <- X2%*%beta + tau*treatment + rnorm(N, 0, sigma[2])
 
 ### Estimating the model
 
-We could estimate the model directly
+In theory, we could estimate the model directly by just writing out the model as above. 
+I have done this [here](https://github.com/khakieconomics/heterogeneous_treatments/blob/master/pure_varying_treatment_effect.stan). 
+There are two problems with this. First, the model is very loosely identified, and even with a large number of iterations we still
+get Rhats that are quite high (indicating that convergence has been lousy). The identification really falls apart if we let $\epsilon$ 
+and $\eta$ be correlated. So estimating this model well means using better priors, which we might not have. 
+Second, the number of parameters grows with the number of observations. HMC run-time grows at a low polynomial of the number of 
+parameters, so this doesn't really scale to big datasets. 
+
+The approach I advocate for here is much simpler. Rather than try to estimate a separate each individual's treatment effect, 
+we say there are three possible data generating processes: 
+
+\[ y_{i} = \begin{cases} 
+      \alpha + X_{i}\beta + \tau_{1}treat_{i} + \epsilon_{i} & \mbox{with probability }\theta_{1,i} \\
+      \alpha + X_{i}\beta + \epsilon_{i} & \mbox{with probability }\theta_{2,i} \\
+      \alpha + X_{i}\beta + \tau_{3}treat_{i} + \epsilon_{i} & \mbox{with probability }\theta_{3,i} \\
+   \end{cases}
+\]
+
+here, $\tau_{1}$ is strictly negative and $\tau_{3}$ is strictly positive. $\theta_{i} = (\theta_{1}, \theta_{2}, \theta_{3})'$ is then defined as 
+
+$$
+\theta_{i} = \mbox{softmax}(\alpha_{\theta} + X_{i}\Gamma)
+$$
+
+where $\Gamma$ is a matrix that maps $X_{i}$ onto the probability of each data generating process. We set
+the last row of $\Gamma$ to zero to identify the model. The estimate of each individual's treatment effect 
+is then simply $\theta_{i}\tau$, where $\tau = (\tau_{1}, 0, \tau_{3})$. The [Stan code](https://github.com/khakieconomics/heterogeneous_treatments/blob/master/mixture_treatment.stan) 
+for this model is as so: 
+
+```{r, eval = F}
+// saved as mixture_treatment.stan
+data {
+  int N; // observations
+  int P; // covariates
+  vector<lower = 0, upper = 1>[N] treatment; // binary treatment
+  matrix[N, P] X; // covariates
+  vector[N] Y;
+}
+transformed data {
+  matrix[N, P+1] X2;
+  X2 = append_col(rep_vector(1.0, N), X);
+}
+parameters {
+  real alpha; // intercept
+  vector[P] beta; // regression coefficients
+  real<upper = 0> tau_1; // negative treatment effect
+  real<lower = 0> tau_3; // positive treatment effect
+  matrix[2, P+1] gamma_raw; // treatment effect model 
+  real<lower = 0> sigma;
+}
+transformed parameters {
+  matrix[N, 3] theta;
+  {
+  matrix[3, P+1] gamma; // treatment effect model parameters (zero centered)
+  gamma = append_row(gamma_raw, rep_row_vector(0.0, P+1));  
+  for(n in 1:N) {
+    theta[n] = softmax(gamma*X2[n]')';
+  }
+  }
+}
+model {
+  alpha ~ normal(0, 1);
+  beta ~ normal(0, 1);
+  -tau_1 ~ lognormal(0, 1);
+  tau_3 ~ lognormal(0, 1);
+  to_vector(gamma_raw) ~ normal(0, 1);
+  sigma ~ cauchy(0, 1);
+  
+  for(n in 1:N) {
+    vector[3] temp;
+    
+    temp[1] = log(theta[n,1]) + normal_lpdf(Y[n] | alpha + X[n]*beta + tau_1*treatment[n], sigma);
+    temp[2] = log(theta[n,2]) + normal_lpdf(Y[n] | alpha + X[n]*beta, sigma);
+    temp[3] = log(theta[n,3]) + normal_lpdf(Y[n] | alpha + X[n]*beta + tau_3*treatment[n], sigma);
+    
+    target += log_sum_exp(temp);
+  }
+}
+generated quantities {
+  vector[N] treatment_effect;
+  vector[3] tau;
+  tau[1] = tau_1;
+  tau[2] = 0.0;
+  tau[3] = tau_3;
+  
+  for(n in 1:N) {
+    treatment_effect[n] = theta[n]*tau;
+  }
+}
+```
+
+We can estimate this model (which estimates very cleanly) with the following code: 
+
+```{r, echo = F, results = "hide", message = F, warning = F}
+library(dplyr); library(reshape2); library(ggplot2); library(rstan)
+```
+
+```{r, results = "hide", cache = T, warning = F, message = F}
+library(dplyr); library(reshape2); library(ggplot2); library(rstan)
+options(mc.cores = parallel::detectCores())
 
 
+compiled_model_2 <- stan_model("mixture_treatment.stan")
+estimated_model <- sampling(compiled_model_2, 
+                            data = list(N = N,
+                                        P = P, 
+                                        X = X, 
+                                        Y = as.numeric(Y),
+                                        treatment = treatment))
 
+```
+
+We can then compare the known individual treatment effects to their estimates (code
+for this chart is a bit involved, if you want to replicate, please check the [git](https://github.com/khakieconomics/heterogeneous_treatments/blob/master/simple_varying_treatment_effects.Rmd) 
+version of this post).
+
+```{r, echo = F, warning = F, message = F}
+parameter_estimates <- estimated_model %>% 
+  as.data.frame() %>% 
+  select(contains("treatment_effect")) %>% 
+  melt() %>% 
+  group_by(variable) %>% 
+  summarise(mean = mean(value), 
+            lower = quantile(value, 0.1),
+            upper = quantile(value, 0.9)) %>% 
+  mutate(actual = tau,
+         expected_actual = X2%*% gamma) 
+
+parameter_estimates %>%
+  arrange(mean) %>% 
+  mutate(ordered_individual = 1:n()) %>% 
+  ggplot(aes(x = ordered_individual)) + 
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = "orange", alpha = 0.5) +
+  geom_line(aes(y = mean)) +
+  geom_point(aes(y = expected_actual), alpha = 0.3) +
+  ylab("Treatment effects") +
+  xlab("Individuals ordered by modeled treatment effect") +
+  ggthemes::theme_economist() +
+  annotate("text", x = N, y = min(X2%*% gamma), hjust = 1, label = "Estimate band", colour = "orange") +
+  annotate("text", x = N, y = min(X2%*% gamma) + .5*sd(X2%*% gamma), hjust = 1, label = "Points = actuals") +
+  ggtitle("Actual treatment effects and modeled")
+
+```
+
+As we can see, the model seems to be able to capture the vast majority of the
+variation in individual treatment effects, without modeling them explicitly. It does
+not do a perfect job. But due to the fact it has very few parameters, it will scale
+nicely to large datasets. We can also incorporate instruments for the treatment
+just as we would with regular Bayesian instrumental variables. 
+
+Now it's not the perfect method. The main problem is that it has a hard maximum ($\tau_{3}$) and minimum ($\tau_{1}$) 
+on the treatment effects. If the distribution of true treatment effects falls ouside this hard maximum, it will shrink
+the estimates of individual treatment effects towards 0 too aggressively. This might be remedied by having more than 3
+treatment effects. Another problem is that the softmax function always puts positive weight on the possibility of a 
+positive, negative and zero treatment effect. In simulations in which the treatment effects are all positive/all 
+negative, the predictions were _more_ extreme than the actuals. Because of these problems, I'd not use this model to 
+estimate average treatment effects. 
+
+What the model does do very well is rank-order individual in terms of their likely treatment effects. To my mind, that is
+what matters. 

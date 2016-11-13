@@ -30,8 +30,8 @@ transformed parameters {
 model {
   alpha ~ normal(0, 1);
   beta ~ normal(0, 1);
-  -tau_1 ~ lognormal(0, 1);
-  tau_3 ~ lognormal(0, 1);
+  tau_1 ~ normal(0, 1);
+  tau_3 ~ normal(0, 1);
   to_vector(gamma_raw) ~ normal(0, 1);
   sigma ~ cauchy(0, 1);
   
